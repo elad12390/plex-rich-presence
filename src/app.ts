@@ -1,25 +1,29 @@
 import {DiscordRPC} from "./rpc.service";
 import {IConfig, ISessionsResponse} from "./plex-interfaces";
 import {PlexApiWrapper} from "./plex.service";
-import {EMPTY, interval} from "rxjs";
-import {catchError, distinctUntilChanged, switchMap, tap} from "rxjs/operators";
+import {EMPTY, interval, Observable, of} from "rxjs";
+import {catchError, delay, distinctUntilChanged, retryWhen, switchMap, tap} from "rxjs/operators";
 import fs from "fs";
 import {last, sortBy} from "lodash";
-import {validateConfig} from "./plex-consts";
+import {DELAY_AFTER_ERROR, TIME_INTERVAL, validateConfig} from "./consts";
 
-const TIME_INTERVAL = 5000;
 export class App {
-    private rpcService?: DiscordRPC;
+    private readonly rpcService?: DiscordRPC;
     private readonly config?: IConfig;
     private runApp(config: IConfig, {MediaContainer: res}: any, plex: PlexApiWrapper) {
         const observedClientIP = config.PLEX_OBSERVING_CLIENT_IP;
         interval(TIME_INTERVAL).pipe(
             switchMap(() => plex.query('/status/sessions')),
-            catchError((e: Error) => {
-                const datenow = new Date();
-                fs.writeFileSync(`fetch-error-log-${datenow.toDateString()}-${datenow.getHours()}.${datenow.getMinutes()}.json`, JSON.stringify(e, Object.getOwnPropertyNames(e), 2))
-                this.rpcService?.closeRPC();
-                return EMPTY;
+            retryWhen((errors: Observable<any>) => {
+                return errors.pipe(
+                    tap((e: Error) => {
+                        const datenow = new Date();
+                        fs.writeFileSync(`fetch-error-log-${datenow.toDateString()}-${datenow.getHours()}.${datenow.getMinutes()}.json`, JSON.stringify(e, Object.getOwnPropertyNames(e), 2))
+                        this.rpcService?.closeRPC();
+                    }),
+                    delay(DELAY_AFTER_ERROR),
+                    switchMap(() => plex.query('/status/sessions'))
+                );
             }),
             tap(({MediaContainer: {Metadata: meta}}: ISessionsResponse) => {
                 if (meta) {
@@ -42,7 +46,21 @@ export class App {
                 const plex = new PlexApiWrapper({ hostname: this.config.PLEX_API_HOSTNAME, token: this.config.PLEX_API_KEY });
                 this.rpcService = new DiscordRPC(this.config);
                 if (this.rpcService)
-                    plex.query('/').then((res) => this.runApp(this.config as IConfig, res, plex));
+                    of(null)
+                        .pipe(
+                            switchMap(() => plex.query('/')),
+                            retryWhen((errors: Observable<any>) => errors.pipe(
+                               delay(DELAY_AFTER_ERROR),
+                               tap((e) => {
+                                   console.log('Cannot query PleX.');
+                                   const datenow = new Date();
+                                   const dateStr = `${datenow.toDateString()}-${datenow.getHours()}.${datenow.getMinutes()}`;
+                                   fs.writeFileSync(`plex-error-log-${dateStr}.json`,
+                                       JSON.stringify(e, Object.getOwnPropertyNames(e), 2))
+                               }),
+                            )),
+                            tap((res) => this.runApp(this.config as IConfig, res, plex))
+                        ).subscribe();
             } else {
                 throw(new Error('Config invalid !'))
             }

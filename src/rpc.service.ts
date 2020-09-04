@@ -1,21 +1,30 @@
 import {Client} from "discord-rpc";
 import { capitalize } from "lodash";
 import {IConfig, ISessionMetadata} from "./plex-interfaces";
+import {interval, Observable, of} from "rxjs";
+import {delay, filter, map, retryWhen, switchMap, take, tap} from "rxjs/operators";
+import {DELAY_AFTER_DISCORD_NOT_FOUND} from "./consts";
 
 export class DiscordRPC {
     private canRecieveCommands = false;
     private rpc = new Client({
         transport: 'ipc'
     })
-
-    constructor(config: any) {
+    tryGetRPC = (config: IConfig) => {
+        this.rpc = new Client({ transport: 'ipc' });
         this.rpc.on('ready', () => {
+            console.log('discord found ! !');
             this.canRecieveCommands = true;
-        })
-
-        this.rpc.login({
-            clientId: config.RPC_CLIENT_ID
         });
+        this.rpc.login({ clientId: config.RPC_CLIENT_ID })
+            .catch((e: Error) => {
+                console.log('RPC service: Could not connect to discord');
+                setTimeout(() => this.tryGetRPC(config), DELAY_AFTER_DISCORD_NOT_FOUND);
+            });
+    }
+
+    constructor(config: IConfig) {
+        this.tryGetRPC(config);
     }
 
     updateRPCTitleTimeStamp(title: string, state: string, imgKey: string, timeStamp?: Date, duration?: Date): void {
